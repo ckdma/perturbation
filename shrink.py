@@ -5,6 +5,9 @@ By default every image gets one full pass:
   1. spray: every colour value is nudged by a random amount up to +/-3 (out of 255)
   2. shrink the image by 3%
   3. enlarge it back to its exact original size
+  4. save it with all metadata removed (EXIF, GPS, camera info, XMP, comments,
+     colour profile). Before that, the image is turned upright according to its
+     EXIF orientation and converted to sRGB, so it still looks the same.
 A fresh random seed is chosen each run (and printed, so a run can be repeated).
 
 Usage:
@@ -18,11 +21,12 @@ Usage:
     python shrink.py photo.jpg --enlarge        # spray + make 3% bigger
 """
 import argparse
+import io
 import random
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageCms, ImageOps
 
 
 def spray(img: Image.Image, strength: int, rng: random.Random) -> Image.Image:
@@ -50,29 +54,48 @@ def spray(img: Image.Image, strength: int, rng: random.Random) -> Image.Image:
     return Image.merge(img.mode, bands)
 
 
+def to_srgb(img: Image.Image) -> Image.Image:
+    """Convert an image with an embedded colour profile to plain sRGB, so it looks
+    the same once the profile is stripped. Leaves the image alone if that fails."""
+    icc = img.info.get("icc_profile")
+    if not icc or img.mode not in ("L", "RGB", "RGBA", "CMYK"):
+        return img
+    try:
+        return ImageCms.profileToProfile(
+            img, ImageCms.ImageCmsProfile(io.BytesIO(icc)), ImageCms.createProfile("sRGB"),
+            outputMode="RGBA" if img.mode == "RGBA" else "RGB")
+    except (ImageCms.PyCMSError, OSError, ValueError):
+        return img
+
+
+def strip_metadata(img: Image.Image) -> Image.Image:
+    """Return a fresh copy holding only the pixels, so nothing else gets saved."""
+    clean = Image.frombytes(img.mode, img.size, img.tobytes())
+    if img.mode in ("P", "PA"):
+        clean.putpalette(img.getpalette(img.palette.mode), img.palette.mode)
+    if "transparency" in img.info:  # part of the picture, not metadata
+        clean.info["transparency"] = img.info["transparency"]
+    return clean
+
+
 def resize(src: Path, dst: Path, scale: float, restore: bool = False, spray_strength: int = 0,
            rng: random.Random | None = None) -> tuple[tuple[int, int], tuple[int, int]]:
     with Image.open(src) as img:
-        old_size = img.size
-        new_size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
-        source = spray(img, spray_strength, rng or random.Random()) if spray_strength else img
+        fmt = img.format
+        upright = to_srgb(ImageOps.exif_transpose(img))
+        old_size = upright.size
+        new_size = (max(1, round(upright.width * scale)), max(1, round(upright.height * scale)))
+        source = spray(upright, spray_strength, rng or random.Random()) if spray_strength else upright
         resized = source.resize(new_size, Image.LANCZOS)
         if restore:
             resized = resized.resize(old_size, Image.LANCZOS)
             new_size = old_size
-        save_kwargs = {}
-        if "exif" in img.info:
-            save_kwargs["exif"] = img.info["exif"]
-        if "icc_profile" in img.info:
-            save_kwargs["icc_profile"] = img.info["icc_profile"]
-        if img.format == "JPEG":
-            save_kwargs["quality"] = 95
-        resized.save(dst, **save_kwargs)
+    strip_metadata(resized).save(dst, **({"quality": 95} if fmt in ("JPEG", "MPO", "WEBP") else {}))
     return old_size, new_size
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Shrink or enlarge images by a percentage.")
+    parser = argparse.ArgumentParser(description="Invisibly perturb images: spray noise, shrink, enlarge back, strip all metadata.")
     parser.add_argument("inputs", nargs="+", type=Path, help="image file(s) to resize")
     parser.add_argument("-o", "--output", type=Path, help="output path (only with a single input)")
     parser.add_argument("-p", "--percent", type=float, default=3.0, help="percent to resize by (default: 3)")
