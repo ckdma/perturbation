@@ -20,3 +20,15 @@ python3 shrink.py *.jpg *.png            # several images at once
 
 The original image is never changed. To make the effect stronger or weaker,
 edit the ranges at the top of `shrink.py`.
+
+## Detector robustness sweep
+
+`sweep.py` applies each perturbation on its own at several strengths (JPEG
+quality, resize, blur, noise, crop, brightness, contrast, plus a
+metadata-only baseline) and writes every variant with its PSNR to
+`manifest.csv`, so detector scores can be compared per perturbation and
+strength.
+
+```bash
+python3 sweep.py image.png -o sweep_out
+```
