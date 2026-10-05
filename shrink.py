@@ -1,67 +1,98 @@
 #!/usr/bin/env python3
-"""Invisibly perturb images in one step.
+"""Perturb images in one step while keeping them looking the same.
 
-    python shrink.py photo.jpg [more images...]    -> photo_perturbed.jpg
+    python3 shrink.py photo.jpg [more images...]    -> photo_perturbed.jpg
 
-For each image: nudge every pixel by a small random amount, shrink it by a
-random few percent, enlarge it back to its original size, and save it with all
-metadata removed. Each image gets its own random strength and shrink amount.
+For each image, with fresh random settings every time:
+  1. crop a little off the edges and scale back to the original size
+  2. nudge brightness, contrast and colour slightly
+  3. shrink by a few percent, then enlarge back to the original size
+  4. spray random noise on every pixel (last, so the resize can't smooth it away)
+  5. save with all metadata removed
 """
 import io
 import random
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageCms, ImageOps
+from PIL import Image, ImageChops, ImageCms, ImageEnhance, ImageOps
 
-SPRAY = (4, 8)    # max change per colour value, out of 255: picked at random per image in this range
-SHRINK = (2, 6)   # percent to shrink before enlarging back: picked at random per image in this range
+# Each image gets a random value from each range. Raise the numbers for a stronger effect.
+CROP = (1.0, 3.0)     # percent cropped off the edges in total, before scaling back up
+TONE = (2.0, 5.0)     # percent change to brightness, contrast and colour (up or down)
+SHRINK = (2.0, 6.0)   # percent to shrink before enlarging back
+SPRAY = (8, 12)       # max noise per colour value, out of 255
 
 
-def perturb(src: Path, rng: random.Random) -> tuple[Path, int, float]:
-    spray = rng.randint(*SPRAY)
+def to_srgb_rgb(img: Image.Image) -> Image.Image:
+    """Turn the image upright and into plain sRGB RGB/RGBA, so it looks the same once metadata is gone."""
+    img = ImageOps.exif_transpose(img)
+    icc = img.info.get("icc_profile")
+    if icc and img.mode in ("L", "RGB", "RGBA", "CMYK"):
+        try:
+            img = ImageCms.profileToProfile(
+                img, ImageCms.ImageCmsProfile(io.BytesIO(icc)), ImageCms.createProfile("sRGB"),
+                outputMode="RGBA" if img.mode == "RGBA" else "RGB")
+        except (ImageCms.PyCMSError, OSError, ValueError):
+            pass
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if "A" in img.mode or "transparency" in img.info else "RGB")
+    return img
+
+
+def spray(img: Image.Image, strength: int, rng: random.Random) -> Image.Image:
+    """Add a random offset in [-strength, +strength] to every colour value; alpha is left alone."""
+    span = 2 * strength + 1
+    plus_table = bytes(max(b % span - strength, 0) for b in range(256))
+    minus_table = bytes(max(strength - b % span, 0) for b in range(256))
+    bands = list(img.split())
+    for i in range(3):
+        raw = rng.randbytes(img.width * img.height)
+        plus = Image.frombytes("L", img.size, raw.translate(plus_table))
+        minus = Image.frombytes("L", img.size, raw.translate(minus_table))
+        bands[i] = ImageChops.subtract(ImageChops.add(bands[i], plus), minus)
+    return Image.merge(img.mode, bands)
+
+
+def perturb(src: Path, rng: random.Random) -> tuple[Path, str]:
+    crop = rng.uniform(*CROP)
+    tone = [rng.choice((-1, 1)) * rng.uniform(*TONE) for _ in range(3)]
     shrink = rng.uniform(*SHRINK)
-    with Image.open(src) as img:
-        fmt = img.format
-        img = ImageOps.exif_transpose(img)  # turn upright before the EXIF is dropped
+    noise = rng.randint(*SPRAY)
 
-        # Convert to plain sRGB so colours stay the same without the colour profile.
-        icc = img.info.get("icc_profile")
-        if icc and img.mode in ("L", "RGB", "RGBA", "CMYK"):
-            try:
-                img = ImageCms.profileToProfile(
-                    img, ImageCms.ImageCmsProfile(io.BytesIO(icc)), ImageCms.createProfile("sRGB"),
-                    outputMode="RGBA" if img.mode == "RGBA" else "RGB")
-            except (ImageCms.PyCMSError, OSError, ValueError):
-                pass
-        if img.mode not in ("RGB", "RGBA"):
-            img = img.convert("RGBA" if "A" in img.mode or "transparency" in img.info else "RGB")
+    with Image.open(src) as original:
+        fmt = original.format
+        img = to_srgb_rgb(original)
+    size = img.size
+    w, h = size
 
-        # Spray: add a random offset in [-spray, +spray] to every colour value.
-        span = 2 * spray + 1
-        plus_table = bytes(max(b % span - spray, 0) for b in range(256))
-        minus_table = bytes(max(spray - b % span, 0) for b in range(256))
-        bands = list(img.split())
-        for i in range(3):  # R, G, B; alpha is left alone
-            raw = rng.randbytes(img.width * img.height)
-            plus = Image.frombytes("L", img.size, raw.translate(plus_table))
-            minus = Image.frombytes("L", img.size, raw.translate(minus_table))
-            bands[i] = ImageChops.subtract(ImageChops.add(bands[i], plus), minus)
-        img = Image.merge(img.mode, bands)
+    # 1. Crop a random amount, split randomly between the edges, then scale back up.
+    dx, dy = w * crop / 100, h * crop / 100
+    left, top = rng.uniform(0, dx), rng.uniform(0, dy)
+    img = img.resize(size, Image.LANCZOS, box=(left, top, w - (dx - left), h - (dy - top)))
 
-        # Shrink, then enlarge back to the exact original size.
-        size = img.size
-        small = (max(1, round(size[0] * (1 - shrink / 100))), max(1, round(size[1] * (1 - shrink / 100))))
-        img = img.resize(small, Image.LANCZOS).resize(size, Image.LANCZOS)
+    # 2. Small brightness / contrast / colour shifts.
+    for enhancer, change in zip((ImageEnhance.Brightness, ImageEnhance.Contrast, ImageEnhance.Color), tone):
+        img = enhancer(img).enhance(1 + change / 100)
 
-    # Save a fresh image holding only the pixels, so no metadata comes along.
+    # 3. Shrink, then enlarge back to the exact original size.
+    small = (max(1, round(w * (1 - shrink / 100))), max(1, round(h * (1 - shrink / 100))))
+    img = img.resize(small, Image.LANCZOS).resize(size, Image.LANCZOS)
+
+    # 4. Spray noise last, so nothing smooths it out.
+    img = spray(img, noise, rng)
+
+    # 5. Save a fresh image holding only the pixels, so no metadata comes along.
     clean = Image.frombytes(img.mode, img.size, img.tobytes())
     dst = src.with_name(f"{src.stem}_perturbed{src.suffix}")
     out_fmt = Image.registered_extensions().get(dst.suffix.lower(), fmt)  # format follows the file name
     if clean.mode == "RGBA" and out_fmt == "JPEG":
         clean = clean.convert("RGB")
     clean.save(dst, **({"quality": 95} if out_fmt in ("JPEG", "WEBP") else {}))
-    return dst, spray, shrink
+
+    summary = (f"crop {crop:.1f}%, brightness {tone[0]:+.1f}%, contrast {tone[1]:+.1f}%, "
+               f"colour {tone[2]:+.1f}%, shrink {shrink:.1f}%, spray +/-{noise}")
+    return dst, summary
 
 
 def main() -> int:
@@ -72,8 +103,8 @@ def main() -> int:
     failed = 0
     for arg in sys.argv[1:]:
         try:
-            dst, spray, shrink = perturb(Path(arg), rng)
-            print(f"{arg} -> {dst}  (spray +/-{spray}, shrink {shrink:.1f}%)")
+            dst, summary = perturb(Path(arg), rng)
+            print(f"{arg} -> {dst}  ({summary})")
         except (OSError, ValueError) as e:
             print(f"{arg}: skipped ({e})", file=sys.stderr)
             failed += 1
