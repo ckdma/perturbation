@@ -3,8 +3,9 @@
 
     python shrink.py photo.jpg [more images...]    -> photo_perturbed.jpg
 
-For each image: nudge every pixel by a tiny random amount, shrink it by 3%,
-enlarge it back to its original size, and save it with all metadata removed.
+For each image: nudge every pixel by a small random amount, shrink it by a
+random few percent, enlarge it back to its original size, and save it with all
+metadata removed. Each image gets its own random strength and shrink amount.
 """
 import io
 import random
@@ -13,11 +14,13 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageCms, ImageOps
 
-SPRAY = 3      # max change per colour value, out of 255 (invisible to the eye)
-SHRINK = 3     # percent to shrink before enlarging back
+SPRAY = (4, 8)    # max change per colour value, out of 255: picked at random per image in this range
+SHRINK = (2, 6)   # percent to shrink before enlarging back: picked at random per image in this range
 
 
-def perturb(src: Path, rng: random.Random) -> Path:
+def perturb(src: Path, rng: random.Random) -> tuple[Path, int, float]:
+    spray = rng.randint(*SPRAY)
+    shrink = rng.uniform(*SHRINK)
     with Image.open(src) as img:
         fmt = img.format
         img = ImageOps.exif_transpose(img)  # turn upright before the EXIF is dropped
@@ -34,10 +37,10 @@ def perturb(src: Path, rng: random.Random) -> Path:
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA" if "A" in img.mode or "transparency" in img.info else "RGB")
 
-        # Spray: add a random offset in [-SPRAY, +SPRAY] to every colour value.
-        span = 2 * SPRAY + 1
-        plus_table = bytes(max(b % span - SPRAY, 0) for b in range(256))
-        minus_table = bytes(max(SPRAY - b % span, 0) for b in range(256))
+        # Spray: add a random offset in [-spray, +spray] to every colour value.
+        span = 2 * spray + 1
+        plus_table = bytes(max(b % span - spray, 0) for b in range(256))
+        minus_table = bytes(max(spray - b % span, 0) for b in range(256))
         bands = list(img.split())
         for i in range(3):  # R, G, B; alpha is left alone
             raw = rng.randbytes(img.width * img.height)
@@ -48,7 +51,7 @@ def perturb(src: Path, rng: random.Random) -> Path:
 
         # Shrink, then enlarge back to the exact original size.
         size = img.size
-        small = (max(1, round(size[0] * (1 - SHRINK / 100))), max(1, round(size[1] * (1 - SHRINK / 100))))
+        small = (max(1, round(size[0] * (1 - shrink / 100))), max(1, round(size[1] * (1 - shrink / 100))))
         img = img.resize(small, Image.LANCZOS).resize(size, Image.LANCZOS)
 
     # Save a fresh image holding only the pixels, so no metadata comes along.
@@ -58,7 +61,7 @@ def perturb(src: Path, rng: random.Random) -> Path:
     if clean.mode == "RGBA" and out_fmt == "JPEG":
         clean = clean.convert("RGB")
     clean.save(dst, **({"quality": 95} if out_fmt in ("JPEG", "WEBP") else {}))
-    return dst
+    return dst, spray, shrink
 
 
 def main() -> int:
@@ -69,7 +72,8 @@ def main() -> int:
     failed = 0
     for arg in sys.argv[1:]:
         try:
-            print(f"{arg} -> {perturb(Path(arg), rng)}")
+            dst, spray, shrink = perturb(Path(arg), rng)
+            print(f"{arg} -> {dst}  (spray +/-{spray}, shrink {shrink:.1f}%)")
         except (OSError, ValueError) as e:
             print(f"{arg}: skipped ({e})", file=sys.stderr)
             failed += 1
