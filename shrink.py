@@ -53,10 +53,11 @@ def perturb(src: Path, rng: random.Random) -> Path:
 
     # Save a fresh image holding only the pixels, so no metadata comes along.
     clean = Image.frombytes(img.mode, img.size, img.tobytes())
-    if clean.mode == "RGBA" and fmt in ("JPEG", "MPO"):
-        clean = clean.convert("RGB")
     dst = src.with_name(f"{src.stem}_perturbed{src.suffix}")
-    clean.save(dst, **({"quality": 95} if fmt in ("JPEG", "MPO", "WEBP") else {}))
+    out_fmt = Image.registered_extensions().get(dst.suffix.lower(), fmt)  # format follows the file name
+    if clean.mode == "RGBA" and out_fmt == "JPEG":
+        clean = clean.convert("RGB")
+    clean.save(dst, **({"quality": 95} if out_fmt in ("JPEG", "WEBP") else {}))
     return dst
 
 
