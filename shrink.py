@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Shrink (or enlarge) an image's width and height by a percentage (default 3%).
+"""Invisibly perturb images: spray tiny random noise, shrink, then enlarge back.
+
+By default every image gets one full pass:
+  1. spray: every colour value is nudged by a random amount up to +/-3 (out of 255)
+  2. shrink the image by 3%
+  3. enlarge it back to its exact original size
+A fresh random seed is chosen each run (and printed, so a run can be repeated).
 
 Usage:
-    python shrink.py input.jpg                  # writes input_shrunk.jpg
-    python shrink.py input.jpg -o out.png
-    python shrink.py input.jpg --percent 5
-    python shrink.py a.jpg b.png c.webp         # several files at once
-    python shrink.py input.jpg --enlarge        # 3% bigger, writes input_enlarged.jpg
-    python shrink.py input.jpg --restore        # 3% smaller, then back to original size,
-                                                # writes input_restored.jpg
-    python shrink.py input.jpg --spray -r       # nudge every pixel by up to +/-3 (invisible),
-                                                # then shrink + restore,
-                                                # writes input_sprayed_restored.jpg
-    python shrink.py input.jpg --spray 5 -r     # nudge by up to +/-5 instead
+    python shrink.py photo.jpg                  # full pass, writes photo_perturbed.jpg
+    python shrink.py *.jpg *.png                # several files at once
+    python shrink.py photo.jpg -o out.png       # choose the output file
+    python shrink.py photo.jpg --seed 1234      # repeat an earlier run exactly
+    python shrink.py photo.jpg --spray 5 --percent 10   # stronger
+    python shrink.py photo.jpg --spray 0        # no noise, only shrink + enlarge back
+    python shrink.py photo.jpg --no-restore     # spray + shrink, keep the smaller size
+    python shrink.py photo.jpg --enlarge        # spray + make 3% bigger
 """
 import argparse
 import random
@@ -75,12 +78,12 @@ def main() -> int:
     parser.add_argument("-p", "--percent", type=float, default=3.0, help="percent to resize by (default: 3)")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("-e", "--enlarge", action="store_true", help="make the image bigger instead of smaller")
-    group.add_argument("-r", "--restore", action="store_true",
-                       help="shrink, then enlarge back to the exact original size")
-    parser.add_argument("-s", "--spray", type=int, nargs="?", const=3, default=0, metavar="STRENGTH",
+    group.add_argument("-n", "--no-restore", action="store_true",
+                       help="shrink only, don't enlarge back to the original size")
+    parser.add_argument("-s", "--spray", type=int, default=3, metavar="STRENGTH",
                         help="before resizing, nudge every pixel by a random amount up to +/-STRENGTH "
-                             "out of 255 (default when given: 3, invisible to the eye)")
-    parser.add_argument("--seed", type=int, help="random seed, so --spray gives the same noise every run")
+                             "out of 255 (default: 3, invisible to the eye; 0 turns it off)")
+    parser.add_argument("--seed", type=int, help="random seed (default: a new random one each run)")
     args = parser.parse_args()
 
     if args.output and len(args.inputs) > 1:
@@ -94,17 +97,24 @@ def main() -> int:
     else:
         if not 0 < args.percent < 100:
             parser.error("--percent must be between 0 and 100")
-        scale, suffix = 1 - args.percent / 100, "restored" if args.restore else "shrunk"
+        scale, suffix = 1 - args.percent / 100, "shrunk" if args.no_restore else "perturbed"
+    restore = not (args.enlarge or args.no_restore)
 
-    if args.spray:
-        suffix = f"sprayed_{suffix}"
-    rng = random.Random(args.seed)
+    seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**32)
+    print(f"seed: {seed}")
+    rng = random.Random(seed)
 
+    failed = 0
     for src in args.inputs:
         dst = args.output or src.with_name(f"{src.stem}_{suffix}{src.suffix}")
-        old, new = resize(src, dst, scale, args.restore, args.spray, rng)
+        try:
+            old, new = resize(src, dst, scale, restore, args.spray, rng)
+        except (OSError, ValueError) as e:
+            print(f"{src}: skipped ({e})", file=sys.stderr)
+            failed += 1
+            continue
         print(f"{src} {old[0]}x{old[1]} -> {dst} {new[0]}x{new[1]}")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
