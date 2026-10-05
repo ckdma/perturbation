@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Shrink an image's width and height by a percentage (default 3%).
+"""Shrink (or enlarge) an image's width and height by a percentage (default 3%).
 
 Usage:
     python shrink.py input.jpg                  # writes input_shrunk.jpg
     python shrink.py input.jpg -o out.png
     python shrink.py input.jpg --percent 5
     python shrink.py a.jpg b.png c.webp         # several files at once
+    python shrink.py input.jpg --enlarge        # 3% bigger, writes input_enlarged.jpg
 """
 import argparse
 import sys
@@ -14,8 +15,7 @@ from pathlib import Path
 from PIL import Image
 
 
-def shrink(src: Path, dst: Path, percent: float) -> tuple[tuple[int, int], tuple[int, int]]:
-    scale = 1 - percent / 100
+def resize(src: Path, dst: Path, scale: float) -> tuple[tuple[int, int], tuple[int, int]]:
     with Image.open(src) as img:
         old_size = img.size
         new_size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
@@ -32,20 +32,27 @@ def shrink(src: Path, dst: Path, percent: float) -> tuple[tuple[int, int], tuple
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Shrink images by a percentage.")
-    parser.add_argument("inputs", nargs="+", type=Path, help="image file(s) to shrink")
+    parser = argparse.ArgumentParser(description="Shrink or enlarge images by a percentage.")
+    parser.add_argument("inputs", nargs="+", type=Path, help="image file(s) to resize")
     parser.add_argument("-o", "--output", type=Path, help="output path (only with a single input)")
-    parser.add_argument("-p", "--percent", type=float, default=3.0, help="percent to shrink by (default: 3)")
+    parser.add_argument("-p", "--percent", type=float, default=3.0, help="percent to resize by (default: 3)")
+    parser.add_argument("-e", "--enlarge", action="store_true", help="make the image bigger instead of smaller")
     args = parser.parse_args()
 
     if args.output and len(args.inputs) > 1:
         parser.error("--output can only be used with a single input file")
-    if not 0 < args.percent < 100:
-        parser.error("--percent must be between 0 and 100")
+    if args.enlarge:
+        if args.percent <= 0:
+            parser.error("--percent must be greater than 0")
+        scale, suffix = 1 + args.percent / 100, "enlarged"
+    else:
+        if not 0 < args.percent < 100:
+            parser.error("--percent must be between 0 and 100")
+        scale, suffix = 1 - args.percent / 100, "shrunk"
 
     for src in args.inputs:
-        dst = args.output or src.with_name(f"{src.stem}_shrunk{src.suffix}")
-        old, new = shrink(src, dst, args.percent)
+        dst = args.output or src.with_name(f"{src.stem}_{suffix}{src.suffix}")
+        old, new = resize(src, dst, scale)
         print(f"{src} {old[0]}x{old[1]} -> {dst} {new[0]}x{new[1]}")
     return 0
 
